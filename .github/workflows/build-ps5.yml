@@ -57,7 +57,7 @@ jobs:
             base-devel clang llvm lld make python python-pip git curl wget \
             unzip tar pkgconf cmake ninja nasm glslang \
             spirv-llvm-translator libclc spirv-headers python-ply \
-            meson rsync python-mako python-markupsafe python-packaging
+            meson rsync python-mako python-markupsafe python-packaging python-yaml
           pacman -Scc --noconfirm
           # Upstream calls Ninja directly. Limit it even on those code paths.
           mkdir -p /usr/local/bin
