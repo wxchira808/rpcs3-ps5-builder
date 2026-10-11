@@ -1,0 +1,100 @@
+name: Build RPCS3 for PS5
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rpcs3-ps5-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Confirm repository is private
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY" \
+            | jq -e '.private == true'
+
+      - name: Prepare cloud runner storage and memory
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          # These are unused preinstalled SDKs on this disposable cloud VM.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          available=$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -1)
+          if (( available < 34359738368 )); then
+            echo 'At least 32 GiB free is needed for this build attempt.'
+            df -h "$GITHUB_WORKSPACE"
+            exit 1
+          fi
+          sudo fallocate -l 4G /mnt/rpcs3-builder.swap
+          sudo chmod 600 /mnt/rpcs3-builder.swap
+          sudo mkswap /mnt/rpcs3-builder.swap
+          sudo swapon /mnt/rpcs3-builder.swap
+          df -h "$GITHUB_WORKSPACE"
+          free -h
+
+      - name: Compile in Arch Linux
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e JOBS=2 -e BUILD_JOBS=2 -e CMAKE_BUILD_PARALLEL_LEVEL=2 \
+            archlinux:base-devel bash -s <<'BUILD' 2>&1 | tee build.log
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed \
+            base-devel clang llvm lld make python python-pip git curl wget \
+            unzip tar pkgconf cmake ninja nasm glslang \
+            spirv-llvm-translator libclc spirv-headers python-ply \
+            meson rsync python-mako python-markupsafe python-packaging
+          # Upstream calls Ninja directly. Limit it even on those code paths.
+          mkdir -p /usr/local/bin
+          printf '#!/bin/sh\nexec /usr/bin/ninja -j2 "$@"\n' > /usr/local/bin/ninja
+          chmod +x /usr/local/bin/ninja
+          export PATH="/usr/local/bin:$PATH"
+          git clone --depth 1 https://github.com/lavavex/rpcs3-PS5.git source
+          cd source
+          git rev-parse HEAD | tee /work/source-revision.txt
+          bash tools/bootstrap.sh
+          test -s dist/PPSA99300/eboot.bin
+          test -s dist/PPSA99300/sce_module/libc.prx
+          test -s dist/PPSA99300/sce_sys/param.json
+          tar -czf /work/RPCS3-PS5-PPSA99300.tar.gz -C dist PPSA99300
+          cd /work
+          sha256sum RPCS3-PS5-PPSA99300.tar.gz > SHA256SUMS.txt
+          du -h RPCS3-PS5-PPSA99300.tar.gz
+          BUILD
+
+      - name: Save build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            build.log
+            source-revision.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Save PS5 title for download
+        uses: actions/upload-artifact@v4
+        with:
+          name: RPCS3-PS5
+          path: |
+            RPCS3-PS5-PPSA99300.tar.gz
+            SHA256SUMS.txt
+            source-revision.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
